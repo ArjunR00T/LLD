@@ -3,64 +3,82 @@ import os
 from pathlib import Path
 import pickle
 import threading
-import time
-
-from datastore.in_memory_store import InMemoryStore
 
 class WAL:
 
     def __init__(self,path="data/wal.log"):
         self._path = Path(path)
         self._lock = threading.Lock()
-        self.log = {}
         self.offset = 1
-        self._store = InMemoryStore()
+        self._offset_initialized = False
 
-
-    def append(self,key,value,expiry,operation):
-
-        task = {
-            "operation" : operation,
-            "key": key,
-            "value": value,
-            "expiry": expiry
-        }
-
-        self.log[self.offset] = task
-        self.offset += 1
-
-        _temp_path = self._path.with_suffix(".tmp")
-
-        with open(_temp_path, "ab") as f:
-            pickle.dump(task, f)
-            f.flush()
-            os.filesync(f.fileno())
-
-        os.replace(_temp_path, self._path)
-
-    def replay(self):
-
-        if not self._path.exists():
+    def _ensure_offset(self):
+        if self._offset_initialized:
             return
 
-        with open(self._path, "rb") as f:
-            events = pickle.load(f)
+        if self._path.exists():
+            with self._path.open("rb") as file:
+                record_offset = 0
+                while True:
+                    try:
+                        task = pickle.load(file)
+                    except EOFError:
+                        break
 
-        for event in events:
-            operation = event["operation"]
-            key = event["key"]
-            value = event["value"]
-            expiry = event["expiry"]
+                    record_offset += 1
+                    task_offset = task.get("offset", record_offset)
+                    if not isinstance(task_offset, int) or task_offset < 1:
+                        raise ValueError("WAL record has an invalid offset")
+                    self.offset = max(self.offset, task_offset + 1)
 
-            if operation == "put":
-                self._store.put(key, value, expiry)
-            elif operation == "delete":
-                self._store.delete(key)
-            
+        self._offset_initialized = True
 
-        
+    def append(self,key,value,expiry,operation):
+        with self._lock:
+            self._ensure_offset()
+            task = {
+                "offset": self.offset,
+                "operation": operation,
+                "key": key,
+                "value": value,
+                "expiry": expiry,
+            }
 
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with self._path.open("ab") as file:
+                pickle.dump(task, file)
+                file.flush()
+                os.fsync(file.fileno())
 
+            self.offset += 1
+
+    def get_offset(self):
+        with self._lock:
+            self._ensure_offset()
+            return self.offset - 1
+
+    def replay(self, after_offset=0):
+        with self._lock:
+            self._ensure_offset()
+            if not self._path.exists():
+                return
+
+            with self._path.open("rb") as file:
+                record_offset = 0
+                while True:
+                    try:
+                        task = pickle.load(file)
+                    except EOFError:
+                        break
+
+                    record_offset += 1
+                    task_offset = task.get("offset", record_offset)
+                    if not isinstance(task_offset, int) or task_offset < 1:
+                        raise ValueError("WAL record has an invalid offset")
+
+                    self.offset = max(self.offset, task_offset + 1)
+                    if task_offset > after_offset:
+                        yield task
         
         
 

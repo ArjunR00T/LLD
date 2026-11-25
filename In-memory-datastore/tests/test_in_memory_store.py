@@ -1,5 +1,7 @@
+import tempfile
 import unittest
 from unittest.mock import patch
+from pathlib import Path
 
 from datastore.in_memory_store import InMemoryStore
 
@@ -15,7 +17,10 @@ def lru_keys(store):
 
 class InMemoryStoreTest(unittest.TestCase):
     def setUp(self):
-        self.store = InMemoryStore()
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        wal_path = Path(self.temp_dir.name) / "wal.log"
+        self.store = InMemoryStore(wal_path=wal_path)
 
     def test_get_returns_value_after_put(self):
         self.store.put("a", 1)
